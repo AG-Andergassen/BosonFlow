@@ -1,0 +1,6 @@
+[submodule "gf_container"]
+	path = gf_container
+	url = https://github.com/AG-Andergassen/gf_container.git
+[submodule "cubature"]
+        path = cubature
+        url = https://github.com/aaleryani/cubature.git

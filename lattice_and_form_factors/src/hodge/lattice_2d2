@@ -1,0 +1,380 @@
+
+#include <lattice_2D.h>
+#include <stdexcept>
+#include <cmath>
+#include <iostream> // debug
+//#define PI 3.1415
+
+lattice_2D_t::lattice_2D_t(std::tuple<coord_t, coord_t> real_basis, double BZ_points_per_unit_length)
+{
+    m_real_basis[0] = std::get<0>(real_basis);
+    m_real_basis[1] = std::get<1>(real_basis);
+    m_span = span_lattice(m_real_basis);
+    m_norms_squared = compute_norms_squared(m_span);
+    m_shells = make_shells(m_span, m_norms_squared);
+    m_reciprocal_basis = get_reciprocal_lattice_basis(m_real_basis);
+    //std::cout<<"b: "<< std::get<1>(std::get<1>(m_reciprocal_basis)) << std::endl;
+    std::tie(m_BZ_mesh, m_BZ_mesh_min_interpoint_spacing) = span_patched_BZ_wigner_seitz(m_reciprocal_basis, BZ_points_per_unit_length);
+}
+
+// base
+std::vector<coord_t> lattice_2D_t::span_lattice(std::array<coord_t, 2> basis, unsigned range )
+{
+    std::vector<coord_t> span;
+    double rx, ry;
+    for (int b = -range; b < static_cast<int>(range)+1; b++)
+    for (int a = -range; a < static_cast<int>(range)+1; a++){
+	coord_t basis_vec1 = basis[0];
+	coord_t basis_vec2 = basis[1];
+	coord_t r = basis_vec1*a + basis_vec2*b;
+	span.push_back(r);
+    }
+    return span;
+}
+
+std::vector<double> lattice_2D_t::compute_norms_squared(const std::vector<coord_t> &vecs)
+{
+    std::vector<double> norms_squared;
+    for (const coord_t &vec : vecs){
+	double norm_squared = vec.dot(vec);
+	norms_squared.push_back(norm_squared);
+    } 
+    return norms_squared;
+}
+
+std::map<double, std::vector<coord_t> > lattice_2D_t::make_shells(const std::vector<coord_t> &span, const std::vector<double> &norms_squared)
+{
+    std::map<double, std::vector<coord_t>> shells;
+    if (span.size() == 0)
+	throw std::invalid_argument("The set of points \"span\" given to make shells of is empty.");
+    
+    for (unsigned i =0; i < norms_squared.size(); i ++){
+	bool key_exists = false;
+	for (auto itr = shells.begin(); itr != shells.end(); itr ++){
+	    double norm_squared = itr->first;
+	    // if a shell with this distance is already there, add lattice vector to shell. 
+	    if (std::abs(norms_squared[i] - norm_squared) < epsilon){
+		key_exists = true;
+		shells[norm_squared].push_back(span[i]);
+	    }
+	}
+	// if no shell with that distance exists, create a new shell with this lattice vector in it
+	if (! key_exists){
+	    shells[norms_squared[i]] = {span[i]};
+	}
+    }
+    return shells;
+}
+
+std::map<double, std::vector<coord_t> > lattice_2D_t::make_shells(const std::vector<coord_t> &span)
+{
+    std::vector<double> norms_squared;
+    norms_squared = compute_norms_squared(span);
+    return make_shells(span, norms_squared);
+}
+
+double lattice_2D_t::get_parallelogram_area(std::array<coord_t, 2> vecs)
+{
+    coord_t vec1 = vecs[0];
+    coord_t vec2 = vecs[1];
+    return std::abs(vec1(0) * vec2(1) - vec1(1)*vec2(0));
+}
+
+coord_t lattice_2D_t::get_orthogonal_vec_2D(coord_t vec)
+{
+    return {vec(1), - vec(0)};
+}
+
+std::array<coord_t, 2> lattice_2D_t::get_reciprocal_lattice_basis(std::array<coord_t, 2> real_basis)
+{
+    double prefactor = 2 * M_PI /get_parallelogram_area(real_basis);
+    coord_t basis1 = get_orthogonal_vec_2D(real_basis[1]) * prefactor;
+    coord_t basis2 = get_orthogonal_vec_2D(real_basis[0]) * (-prefactor);
+    return {basis1, basis2};
+}
+
+std::unordered_map<coord_t, unsigned, CoordHash<coord_t> > lattice_2D_t::get_coord_to_idx_map(const std::vector<coord_t> &BZ_mesh)
+{
+    std::unordered_map<coord_t, unsigned, CoordHash<coord_t> > coord_to_idx;
+    for (unsigned k_idx = 0; k_idx < BZ_mesh.size(); k_idx++){
+	coord_to_idx[BZ_mesh[k_idx]] = k_idx;
+    }
+    return coord_to_idx;
+}
+
+std::tuple<unsigned, double> lattice_2D_t::get_idx_from_coord(coord_t coord, const std::vector<coord_t> &mesh)
+{
+    unsigned idx;
+    double deviation;
+    bool is_first = true;
+    for (unsigned i = 0; i < mesh.size(); i ++){
+	coord_t potential_coord = mesh[i];
+	//double norm = sqrt(std::pow(std::get<0>(potential_coord) - std::get<0>(coord), 2) + std::pow(std::get<1>(potential_coord) - std::get<1>(coord), 2));
+	double norm = std::sqrt((potential_coord - coord).dot(potential_coord - coord));
+	if (is_first || norm < deviation){
+	    is_first = false;
+	    deviation = norm;
+	    idx = i;
+	}
+    }
+    return {idx, deviation};
+}
+
+std::tuple<unsigned, double> lattice_2D_t::get_mom_idx_from_coord(coord_t coord)
+{
+    std::vector<std::tuple<unsigned, double> > idxes_and_deviations;
+    bool is_first = true;
+    
+    unsigned smallest_deviation_idx;
+    double smallest_deviation;
+
+    // handle periodicity
+    for (int a = -1; a <= 1; a++)
+    for (int b = -1; b <= 1; b++){
+	coord_t shifted_coord = coord + m_reciprocal_basis[0] * a + m_reciprocal_basis[1] * b;
+	auto [idx, deviation] = get_idx_from_coord(shifted_coord, m_BZ_mesh );
+	if (is_first){
+	    is_first = false;
+	    smallest_deviation_idx = idx;
+	    smallest_deviation = deviation;
+	    continue;
+	}
+	if (deviation < smallest_deviation){
+	    smallest_deviation_idx = idx;
+	    smallest_deviation = deviation;
+	}
+    }
+
+    return std::make_tuple(smallest_deviation_idx, smallest_deviation/m_BZ_mesh_min_interpoint_spacing);
+}
+
+std::vector<coord_t> lattice_2D_t::span_patched_BZ(std::array<coord_t, 2> reciprocal_basis)
+{
+    std::vector<coord_t> BZ;
+    //..... TODO
+}
+
+coord_t lattice_2D_t::find_intercept(coord_t a, coord_t c, coord_t b, coord_t d)
+{
+    //find intercept of the (braag) lines given by
+    // (x(s), y(s)) = c + s*a
+    // (x'(s), y'(s)) = d + s*b 
+
+    double determinant = b(1) * a(0) - b(0) * a(1);
+
+    if (determinant == 0){
+	throw std::invalid_argument("No intercept of parallel lines!"); 
+    }
+    double s = (c(1) * a(0) - c(0) * a(1) + d(0) * a(1) - d(1) * a(0))/determinant;
+
+    coord_t intercept = d + b * s;
+    return intercept;
+}
+
+std::tuple<coord_t, coord_t> lattice_2D_t::get_braag_line(coord_t vec)
+{
+    // the line bisecting a (reciprocal) lattice vector
+    // (x(s), y(s)) = s * a + c
+    coord_t c = vec*0.5;
+    coord_t a = get_orthogonal_vec_2D(vec);
+    return std::make_tuple(a, c);
+}
+
+std::vector<std::vector<unsigned> > lattice_2D_t::get_permutations(const std::vector<unsigned> &ls)
+{
+    if (ls.size() <= 1)
+	return {ls};
+    
+    std::vector<std::vector<unsigned> > permutations;
+    for (unsigned i = 0; i < ls.size(); i ++){
+	//std::cout << i;
+	std::vector<unsigned> ls_copy = ls;
+	unsigned ele = ls_copy[i];
+	ls_copy.erase(ls_copy.begin()+i);
+	std::vector<std::vector<unsigned> > sub_perms = get_permutations(ls_copy);
+	for (auto &sub_perm : sub_perms){
+	    std::vector<unsigned> new_permutation = {ele};
+	    new_permutation.insert(new_permutation.end(), sub_perm.begin(), sub_perm.end() );
+	    permutations.push_back(new_permutation);
+	}
+    }
+    return permutations;
+}
+
+bool lattice_2D_t::check_if_convex(const std::vector<coord_t> &vertices)
+{
+    int orientation_counter = 0;
+    for (unsigned i = 0; i < vertices.size(); i ++){
+	coord_t a = vertices[i];
+	coord_t b;
+	if (i + 1 == vertices.size())
+	    b = vertices[0];
+	else
+	    b = vertices[i + 1];
+	double cross_product_with_z = a(0) * b(1) - a(1) * b(0);
+	if (cross_product_with_z > 0)
+	    orientation_counter += 1;
+	else
+	    orientation_counter -= 1;
+    }
+    return std::abs(orientation_counter) == vertices.size();
+}
+
+std::vector<coord_t> lattice_2D_t::get_wigner_seitz_vertices(std::array<coord_t, 2> basis)
+{
+    std::vector<coord_t> lattice = span_lattice(basis);
+    std::map<double, std::vector<coord_t> > shells = make_shells(lattice);
+    for (auto h = shells.begin(); h != shells.end(); h ++)
+	std::cout << h->first << std::endl;
+    auto shells_itr = shells.begin();
+    shells_itr++; // nearest neighbohr
+    std::vector<coord_t> closest_neighbohrs = shells_itr->second;
+    //for (unsigned i = 0; i < closest_neighbohrs.size(); i ++){
+    //std::cout << i << "mm (" << std::get<0>(closest_neighbohrs[i]) << std::endl;
+    //}
+    if (closest_neighbohrs.size() == 2){ // in case of a non-homogeneous lattice, one really needs also take the next nearest neighbors to form the braag lines which intersection will form  a wigner-seitz cell
+	shells_itr++;
+	std::vector<coord_t> next_nearest_neighbohrs = shells_itr->second;
+        closest_neighbohrs.insert(closest_neighbohrs.end(), next_nearest_neighbohrs.begin(), next_nearest_neighbohrs.end());
+    }
+
+    std::vector<unsigned> vertices_indices;
+    for (unsigned i = 0; i < closest_neighbohrs.size(); i++)
+	vertices_indices.push_back(i);
+    
+    std::vector<std::vector<unsigned> > vertex_idx_permutations = get_permutations(vertices_indices);
+    
+    // try to find the permutation which forms an oriented convex polygon
+    for (std::vector<unsigned> &idxes: vertex_idx_permutations){
+	std::vector<coord_t> permuted_closest_neighbohrs;
+	for (unsigned idx: idxes)
+	    permuted_closest_neighbohrs.push_back(closest_neighbohrs[idx]);
+
+	if (check_if_convex(permuted_closest_neighbohrs)){
+	    std::cout << idxes[0] << " " << idxes[1] <<" " << idxes[2]<<" " << idxes[3]<<" " << idxes[4]<< " " << idxes[5] << std::endl;
+	    // pick this permutation
+	    closest_neighbohrs = permuted_closest_neighbohrs;
+	    break;
+	}
+    }
+    
+    // form the braag lines and find their intersections (these will be the vertices of the wigner-seitz cell)
+    std::vector<coord_t> vertices;
+    for (unsigned i = 0; i < closest_neighbohrs.size(); i ++){
+	unsigned i_minus_1 = (i == 0) ? closest_neighbohrs.size()-1 : i - 1;
+	//std::cout << i << "mm (" << std::get<0>(closest_neighbohrs[i_minus_1]) << std::endl;
+	auto [a, c] = get_braag_line(closest_neighbohrs[i]);
+	auto [b, d] = get_braag_line(closest_neighbohrs[i_minus_1]);
+	//std::cout<<std::get<0>(a) <<  " "<<std::get<0>(c) <<  " "<<std::get<0>(b) <<  " "<<std::get<0>(d) <<  std::endl;
+	coord_t intercept = find_intercept(a, c, b, d);
+	vertices.push_back(intercept);
+    }
+    //for (auto v : vertices)
+    //	std::cout << "v: " << std::get<0>(v) << std::endl;
+
+    return vertices;
+}
+
+std::tuple<std::vector<coord_t>, double> lattice_2D_t::span_patched_BZ_wigner_seitz(std::array<coord_t, 2> reciprocal_basis, double points_per_unit_length){
+    // This method has been tested thoroughly only for a regular lattice.
+    std::cout << "Forming BZ vertices..";
+    std::vector<coord_t> vertices = get_wigner_seitz_vertices(reciprocal_basis);
+
+    auto edges = form_mesh_edges_from_vertices(vertices, points_per_unit_length);
+    
+    // make a flattened edges array
+    std::vector<coord_t> edges_flat;
+    for (auto &edge : edges){ 
+	for (auto p : edge){
+	    std::cout << "edge point" << p(0) << std::endl;
+	}
+	edges_flat.insert(edges_flat.end(), edge.begin(), edge.end());
+    }
+    if (edges_flat.size() % 2 != 0)
+	throw std::invalid_argument("Boundary should have an even number of points!");
+
+    // since the BZ is a torus, half the boundary points are repeated points
+    edges_flat.resize(int(edges_flat.size()/2));
+    edges_flat.erase(edges_flat.begin());
+    
+
+    std::vector<coord_t> BZ;
+    
+    // append the boundary points of the mesh to the BZ
+    BZ.insert(BZ.end(), edges_flat.begin(), edges_flat.end());
+
+    double interpoint_spacing = std::sqrt((edges[0][0] - edges[0][1]).dot(edges[0][0] - edges[0][1]));
+
+    std::vector<coord_t> BZ_insides = span_mesh_strictly_in_polygon(vertices, m_real_basis, interpoint_spacing);
+    BZ.insert(BZ.end(), BZ_insides.begin(), BZ_insides.end());
+
+    return std::make_tuple(BZ, interpoint_spacing);
+}
+
+bool lattice_2D_t::is_inside_polygon(const std::vector<coord_t> &vertices, coord_t pt)
+{
+    // adopted from: https://wrf.ecse.rpi.edu/Research/Short_Notes/pnpoly.html   
+    int j = 0;
+    bool c = false;
+    for (int i = 0; i < vertices.size()-1; i ++){
+	j = i + 1;
+	if ( ( ( vertices[i](1) > pt(1) ) != ( vertices[j](1) > pt(1) ) ) && ( pt(0) < ( vertices[j](0) - vertices[i](0) ) * ( pt(1) - vertices[i](1) )/ ( vertices[j](1) - vertices[i](1) ) + vertices[i](0)) )
+	    c = !c;
+    }
+    return c;
+}
+
+bool lattice_2D_t::is_strictly_inside_polygon(const std::vector<coord_t> &vertices, coord_t pt)
+{
+    coord_t pt1 = {pt(0) + epsilon, pt(1)+epsilon};
+    coord_t pt2 = {pt(0) - epsilon, pt(1)+epsilon};
+    coord_t pt3 = {pt(0) + epsilon, pt(1)-epsilon};
+    coord_t pt4 = {pt(0) - epsilon, pt(1)-epsilon};
+    return is_inside_polygon(vertices, pt1) && is_inside_polygon(vertices, pt2) && is_inside_polygon(vertices, pt3) && is_inside_polygon(vertices, pt4);
+}
+
+std::vector<std::vector<coord_t> > lattice_2D_t::form_mesh_edges_from_vertices(const std::vector<coord_t> &vertices, double points_per_unit_length)
+{
+    std::vector<std::vector<coord_t> > edges;
+    
+    // make perimeter
+    for (unsigned i = 0; i < vertices.size(); i ++){
+	unsigned i_minus_1 = (i == 0) ? vertices.size()-1 : i - 1;
+	coord_t spacing_vec = vertices[i] - vertices[i_minus_1];
+	double polygon_side_distance = std::sqrt(spacing_vec.dot(spacing_vec) );
+	
+	int N = static_cast<int>(points_per_unit_length * polygon_side_distance)+1;
+	std::vector<coord_t> pts;
+	for (unsigned j = 0; j < N-1; j++){
+	    double s = static_cast<double>(j)/static_cast<double>(N-1);
+	    coord_t new_pt = vertices[i]*s + vertices[i_minus_1]*(1.0-s);
+	    pts.push_back(new_pt);
+	}
+	edges.push_back(pts);
+    }
+
+    return edges;
+}
+
+
+std::vector<coord_t> lattice_2D_t::span_mesh_strictly_in_polygon(const std::vector<coord_t> &vertices, const std::array<coord_t, 2> &normalised_basis, double interpoint_spacing)
+{
+    std::vector<coord_t> span;
+    
+    std::vector<coord_t> polygon_vertices = vertices;
+    // augment the vertices array by repeating its first point towards the end. Necessary for the call to is_inside_polygon that will follow to work properly.
+    polygon_vertices.push_back(vertices[0]);
+
+    coord_t basis_1 = normalised_basis[0] * interpoint_spacing;
+    coord_t basis_2 = normalised_basis[1] * interpoint_spacing;
+
+    int range = 100;
+    for (int b = -range; b <= range; b++)
+    for (int a = -range; a <= range; a++){
+	coord_t r = basis_1 * a + basis_2 * b;
+	if (is_strictly_inside_polygon(polygon_vertices, r))
+	    span.push_back(r);
+    }
+
+    return span;
+}

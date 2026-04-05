@@ -1,0 +1,262 @@
+* BosonFlow: A C++ codebase for dynamic fRG and single-boson exchange in correlated fermion systems
+
+** Overview
+
+BosonFlow is a unified C++ implementation of the functional renormalization group and the parquet equations within the single-boson exchange formalism for several paradigmatic tight-binding and impurity models at equilibrium. The implementation computes the full dynamic vertex and self-energies, with momentum dependence treated using a truncated unity framework. We implement multiple self-energy flow equations, cutoff schemes, and extensions ranging from the dynamical functional renormalization group to multiloop flow equations that incorporate cutoffs in both the propagator and the interaction. The codebase serves as a reference for recent developments in the fRG and parquet methods for correlated electron systems and provides a flexible foundation for developing new many-body approaches and extensions.
+
+
+
+** Installation
+- Clone the repository with =git clone https://github.com/AG-Andergassen/BosonFlow.git=
+- Move to the new directory =cd BosonFlow=
+- Checkout to the branch you want: e.g. =git checkout main=
+- initialise the correct submodules: =git submodule init=
+- Update the submodules =git submodule update --remote=
+
+
+** Requirements
+
+*** Essential dependencies
+- *C++ compiler*: recommended gcc13+ or LLVM/Clang 16+ (with C++20 support)
+- *boost* (≥1.66): for odeint ODE solver and utility libraries
+- *FFTW3* (≥3.3.8): fast Fourier transforms for bubble convolutions
+- *GSL* (≥2.6): mathematical functions
+- *HDF5 C library* (≥1.10.3): persistent data storage and checkpointing
+- *Eigen3* (≥3.3.7): linear algebra
+- *OpenMP*: multi-threaded parallelization (required with clang, included with gcc. Recommended)
+
+
+*** Requirements setup on a cluster
+In case this is running on a computational cluster, these libraries must be loaded as modules.
+To do so, 
+- Run =module avail= to get a list of the available modules.  You get a list like the following (or bigger)
+#+begin_example
+[aleryani@master ~]$ module avail
+
+------------------------ /usr/share/Modules/modulefiles ------------------------
+dot         module-git  module-info modules     null        use.own
+
+------------------------------- /etc/modulefiles -------------------------------
+compiler/clang/11.0.1    lib/atlas/3.10.3         lib/papi/5.6.0
+compiler/gcc/10.2.0      lib/blis/0.6.0           lib/papi/6.0.0.1
+compiler/gcc/7.3.0       lib/boost/1.66_gcc6      lib/petsc/3.10.2
+compiler/gcc/7.4.0       lib/boost/1.66_gcc7      lib/petsc/3.10.2-2021
+compiler/gcc/9.2.0       lib/boost/1.72_gcc7      lib/petsc/3.9.4
+compiler/python/2.7.15   lib/boost/1.75_gcc10     lib/petsc4py/3.9.1_py3
+compiler/python/2.7.16   lib/eigen/3.3.4          lib/plasma/17.1
+compiler/python/3.6.5    lib/eigen/3.3.7          lib/scalapack/2.0.2
+dev/automake/1.16.1      lib/eigen/3.3.9          lib/scipy/1.2.1
+dev/automake/1.16.3      lib/fftw/3.3.6           lib/slepc/3.9.2
+dev/binutils/2.30        lib/fftw/3.3.8           lib/slepc4py/3.9.0_py3
+dev/cmake/3.11.4         lib/geos/3.7.2           lib/suitesparse/5.3.0
+dev/cmake/3.20.0         lib/gsl/2.6_gcc7         lib/superlu/5.2.1
+dev/cpp2py/1.5           lib/hdf5/1.10.3          lib/trng/4.15
+dev/cpp2py/1.5.23        lib/hdf5/1.10.3_parallel mpi/mpich/3.2.1
+dev/cpp2py/1.6.0         lib/libunwind/1.2.1      mpi/mvapich/2.3b
+dev/libtool/2.4.6        lib/libunwind/1.2.1_gcc7 prof/dyninst/9.0.0
+dev/trilinos/12.13       lib/libunwind/1.4.0_gcc7 prof/extrae/3.5.4
+dev/trilinos/12.13_gcc6  lib/mkl/2018.1           prof/extrae/3.7.1_gcc7
+dev/triqs/2.0            lib/mkl/2020.3           prof/paraver/4.7.1
+dev/triqs/2.0_corr       lib/nfft/3.4.1           tools/carbon
+dev/triqs/2.2.0          lib/nfft/3.5.1           tools/diamond
+dev/triqs/2.2.0_stack    lib/numpy/1.16.1         tools/tmux/3.2a
+lib/adios/1.13.1         lib/openblas/0.20.0
+lib/arpackng/3.6.0       lib/openblas/0.3.7
+
+[aleryani@master ~]$ 
+#+end_example
+- Search the list like the above for "gcc", "boost", "fftw3", "hdf5" and "eigen" for the corresponding modules. Then load each of them individually via =module --auto load XXXX=. E.g. to load boost from the output above, try running =module --auto load lib/boost/1.75_gcc10=.
+- If no errors are encountered, add all the load lines to the end of your `.bashrc` file (in the home directory) so that they'll be ran automatically every time you login. 
+- If errors are encountered, try to figure out what's wrong, or contact the cluster's tech support. If there are some missing modules, contact the tech support to request its installation.
+
+*** Requirements on your personal computer
+If you are trying to use this code on your personal computer, you'll have to handle installing the dependencies yourself.
+
+** Building
+
+First, configure your build in =config.mk= (see **Usage** section below for key compile-time flags).
+
+Then build using:
+- =make run=: Optimized binary with OpenMP multi-threading, suitable for cluster submission
+- =make runclang=: Same as =make run=, but using clang++ (often better optimization)
+- =make dbg=: Debug build with bounds checking and no multi-threading, suitable for gdb
+- =make clean=: Remove all build artifacts
+
+Full rebuild example: =make clean && make run -j=4=
+
+
+** Quick Start
+
+1. *Configure* =config.mk= with basic compile-time choices (see **Compile-Time Flags** below)
+2. *Build*: =make clean && make run -j=
+3. *Run*: =./bin/run ./my/output/directory --beta 10.0 --u 3.0 --mu 0.2=
+
+For help on all runtime options: =./bin/run --help=
+
+
+** Usage
+
+*** Step 1: Select Compile-Time Flags in config.mk
+
+The main configuration file is =config.mk= in the root directory. At minimum, you must choose:
+
+*Important selections:*
+- *Method (pick one)*: =FLOW_EQUATION_METHOD= (ODE integration of flow equations) or =SELF_CONSISTENT_METHOD= (solving self-consistent equations)
+- *Model (pick one)*: =THE_MODEL_VAL=HubbardAtom=, =SquareHubbard=, =AndersonImpurity=, etc.
+- *Flow scheme (pick at least one G-flow/U-flow scheme. No more than one U-flow and one G-flow)*: =OMEGA_FLOW=, =INT_FLOW=, =TEMP_FLOW=, =INTRP_FLOW=, etc.
+- *Momentum resolution*: =K_DIM_VAL=16= (or similar; higher = finer momentum grid, more memory/time)
+- *Frequency box*: =COUNT_VAL=5= (or similar; higher = more frequencies)
+
+*Optional toggles:*
+- =MULTIFILE_OUTPUT=: Enable output at every integration step
+- =AUTORESUME_CALCULATION=: Resume from last integration step if outputted
+- =LOGARITHMIC_GRIDS=: Use logarithmic frequency spacing with interpolation (experimental)
+- =STATIC_CALCULATION=: Simplify to the static-vertex approximation (faster, less accurate)
+
+*** Step 2: Build
+
+#+begin_example
+make clean && make run -j4
+#+end_example
+
+This produces =./bin/run= (optimized binary, multi-threaded).
+
+*** Step 3: Run with Runtime Parameters
+
+The executable accepts physical parameters at runtime:
+
+#+begin_example
+# Basic run with U=3.0, temperature β=10, chemical potential μ=0.2
+./bin/run ./my/output/directory --beta 10.0 --u 3.0 --mu 0.2
+
+# With momentum-space refinement (finer sampling near special points)
+./bin/run ./results --beta 8.0 --u 2.0 --refine-at idx_00:0.02 --refine-at idx_pipi:0.015
+
+# Show all available runtime options
+./bin/run --help
+#+end_example
+
+
+** Flag Reference
+
+*** Compile-time flags (config.mk)
+Compile-time flags are easier to read by decision group. In general, choose one option from each "pick one" group and then add optional toggles as needed.
+
+**** Method (pick one)
+| Flag | Purpose |
+|------|---------|
+| =FLOW_EQUATION_METHOD= | ODE-based flow integration |
+| =SELF_CONSISTENT_METHOD= | Self-consistent (non-ODE) solver path |
+
+**** Model (pick one)
+| Flag | Purpose | Typical values |
+|------|---------|----------------|
+| =THE_MODEL_VAL= | Select active model class | =HubbardAtom=, =AndersonImpurity=, =AndersonImpurityHolstein=, =SquareHubbard=, =SquareHubbardHolstein=, =SquareHubbardPeierls=, =SquareHubbardLongRange=, =TriangularHubbard=, =ChainHubbard=, =FCCHubbard= |
+
+**** G-flow scheme (pick at most one)
+| Flag | Purpose |
+|------|---------|
+| =OMEGA_FLOW= | Omega cutoff flow scheme |
+| =INT_FLOW= | Interaction flow scheme |
+| =TEMP_FLOW= | Temperature flow scheme |
+
+**** U-flow scheme (pick at most one)
+| Flag | Purpose |
+|------|---------|
+| =ACTUAL_U_FLOW= | Multiplicative U-flow of the bare interaction |
+| =FREE_U_FLOW= | Model-dependent U-flow of the bare interaction |
+
+**** Self-energy mode (pick one)
+| Flag | Purpose |
+|------|---------|
+| =SELFEN_FLOW= | Standard one-loop flow of self-energy |
+| =SELFEN_SDE_SBE_MAGNETIC= | Self-energy from SBE magnetic-channel SDE |
+| =SELFEN_SDE_SBE_DENSITY= | Self-energy from SBE density-channel SDE |
+| =SELFEN_SDE_SBE_SUPERCONDUCTING= | Self-energy from SBE superconducting-channel SDE |
+
+**** Optional toggles
+| Flag | Purpose | Default behavior when disabled |
+|------|---------|--------------------------------|
+| =MULTIFILE_OUTPUT= | Multi-file output/checkpoint mode | Write only final output |
+| =AUTORESUME_CALCULATION= | Resume from existing checkpoint files | Start from fresh initial condition |
+| =LOGARITHMIC_GRIDS= | Use logarithmic frequency grids | Uniform frequency grids |
+| =DEBUG_EULER= | Fixed-step Euler integrator (for debugging purposes) | Adaptive ODE integrator |
+| =STATIC_CALCULATION= | Static-vertex approximation | Full dynamic-vertex |
+| =FIX_FILLING= | Keep the filling fixed during the flow by adjusting the chemical-potential shift | Filling is allowed to drift according to the fixed runtime chemical potential |
+| =PRECOMPUTE_STATE_PROJECTIONS= | Precompute form-factor projection data used repeatedly during the flow | Compute projection data on demand |
+| =RESTRICT_FREQUENCY_SUMS_TO_STATE_PROJECTIONS_BOX= | Restrict frequency summations to the momentum box defined by the state projections | Sum over all frequencies (recommended when =PRECOMPUTE_STATE_PROJECTIONS= is enabled) |
+| =UTILIZE_ALGEBRAIC_SYMMETRIES= | Use algebraic (time-reversal, corssing ..etc symmetry) symmetry operations to reduce the computational cost | No algebraic symmetry reduction (highly recommended to enable) |
+| =UTILIZE_LATTICE_SYMMETRIES= | Use lattice point-group symmetry operations to reduce the computational cost | No lattice symmetry reduction (highly recommended to enable) |
+
+**** Approximation / performance flags
+| Flag | Purpose | Effect / tradeoff |
+|------|---------|-------------------|
+| =SBEa_APPROXIMATION= | Disable the rest-function flow in the SBE flow-equation treatment | Cheaper calculation with reduced feedback from multiboson rest functions |
+| =SBEb_APPROXIMATION= | Neglect the rest function already before setting up the flow equations | Stronger approximation than SBEa; removes rest-function flow and its feedback entirely |
+| =NO_HEDIN_VERTEX_FLOW= | Freeze the Hedin / fermion-boson vertex at its bare value | Reduces cost further, but neglects vertex-flow renormalization |
+| =SET_MIXED_BUBBLES_TO_ZERO= | Neglect bubble contributions that are off-diagonal in form-factor space | Reduces computational cost, but introduces an additional approximation |
+
+Note (exceptions and constraints):
+- Self-energy mode flags are mutually exclusive in practice (pick one)
+- Exception: =SELFEN_FLOW= can be combined with one SDE self-energy flag for mixed-mode self-consistency
+- =FREE_U_FLOW=  availability depends on the chosen model. So far, only AndersonImpurityHolstein. To be used with the T-flow.
+- U-flow schemes not compatable with =PRECOMPUTE_STATE_PROJECTIONS= flag
+
+*** Runtime flags (./bin/run ...)
+
+Physical parameters are set at runtime via command-line flags. The output directory is set by a positional runtime argument.
+
+**** General options
+| Flag | Meaning |
+|------|---------|
+| =--help=, =-h= | Print help message and exit |
+| =<output-dir>= | Optional first positional argument; base directory where run output folders are created (default: current directory) |
+| =--beta <value>= | Inverse temperature β (default from config.mk) |
+| =--mu <value>= | Chemical potential μ (default from config.mk) |
+| =--filling <value>= | Target filling used for the initial chemical-potential adjustment; if omitted, filling follows the chosen chemical potential |
+
+**** Hubbard model interactions
+| Flag | Meaning |
+|------|---------|
+| =--u <value>= | On-site Coulomb interaction U |
+| =--u-prime <value>= | Nearest-neighbor interaction V |
+| =--t-prime <value>= | Next-nearest-neighbor hopping t' |
+| =--t-prime-prime <value>= | Next-next-nearest-neighbor hopping t'' |
+
+**** Triangular lattice (additional)
+| Flag | Meaning |
+|------|---------|
+| =--wint <value>= | Third-neighbor interaction W |
+| =--wwint <value>= | Fourth-neighbor interaction W' |
+
+**** Extended interactions
+| Flag | Meaning |
+|------|---------|
+| =--q <value>= | Long-range coupling momentum |  
+| =--k-s <value>= | Screening parameter |
+
+**** Anderson impurity model
+| Flag | Meaning |
+|------|---------|
+| =--d <value>= | Half-bandwidth D of conduction band |
+| =--delta-0 <value>= | Hybridization strength Δ₀ |
+| =--dos-type <BOX|CONST>= | Anderson impurity hybridization / DOS type (default: =CONST=) |
+
+**** Holstein (electron-phonon) model
+| Flag | Meaning |
+|------|---------|
+| =--g0 <value>= | Electron-phonon coupling constant |
+| =--omega0 <value>= | Einstein phonon frequency ω₀ |
+
+**** Momentum-space refinement
+| Flag | Meaning |
+|------|---------|
+| =--refine-at <idx_name>:<value>= | Add momentum refinement at special point (e.g., =idx_00:0.02=, =idx_pipi:0.015=) |
+| =--refine-at-clear= | Clear all compiled-in refinement points before adding new ones |
+
+Note:
+- Runtime flags override physical defaults
+- Output directory is runtime-configured via the first positional argument (e.g. =./bin/run ./results --u 3.0 --beta 10.0=)
+- In Anderson impurity runs, =--dos-type BOX= is not compatible with =TEMP_FLOW=; use =CONST= for temperature-flow calculations.
+
+
